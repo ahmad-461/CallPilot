@@ -136,6 +136,7 @@ class Call(Base):
         ),
         nullable=True,
     )
+    handoff_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

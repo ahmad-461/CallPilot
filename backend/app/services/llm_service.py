@@ -1,5 +1,7 @@
 import os
+import re
 import logging
+from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Set, Tuple
 from google import genai
 from google.genai import types
@@ -11,6 +13,15 @@ logger = logging.getLogger(__name__)
 GEMINI_MODEL = "gemini-2.5-flash"
 PLACEHOLDER_BUSINESS_ID = "00000000-0000-0000-0000-000000000000"
 
+@dataclass
+class TurnResult:
+    response_text: str
+    is_complete: bool = False
+    outcome: str = "unresolved"
+    is_handoff: bool = False
+    handoff_reason: Optional[str] = None
+
+
 SYSTEM_PROMPT = """You are a friendly, natural-sounding AI phone receptionist for CallPilot Salon & Spa.
 Your primary job is to help callers book, reschedule, or cancel appointments, and answer questions about business hours, services, location, and pricing.
 
@@ -20,7 +31,9 @@ Key guidelines:
 3. Always verbally confirm appointment details (e.g., date, time, service) with the caller before calling tools that create, update, or cancel appointments.
 4. Use get_business_info for any questions regarding business hours, services, pricing, or location.
 5. Do not invent appointment availability or business information without checking tools.
-6. When the caller's request has been fully addressed and they say goodbye or indicate they are done (e.g. "that's all", "thank you goodbye", "bye"), include the marker [CALL_COMPLETE] at the end of your response.
+6. When the caller explicitly asks for a human, representative, agent, or real person (e.g. "talk to a person", "human", "representative", "agent"), do not try to keep helping — respond politely acknowledging the request and include the marker [HANDOFF:explicit_request] at the end of your response.
+7. If get_business_info returns "no information found" / found: False and the caller's follow-up indicates continued confusion or inability to answer, do not keep repeating yourself — politely offer a human agent and include the marker [HANDOFF:info_not_found] at the end of your response.
+8. When the caller's request has been fully addressed and they say goodbye or indicate they are done (e.g. "that's all", "thank you goodbye", "bye"), include the marker [CALL_COMPLETE] at the end of your response.
 """
 
 FUNCTIONS = [
@@ -192,13 +205,14 @@ def process_conversation_turn(
     customer_phone: str,
     user_speech: str,
     client: Optional[genai.Client] = None,
-) -> Tuple[str, bool, str]:
+) -> TurnResult:
     """
     Processes a conversation turn:
     1. Appends caller speech to call history
     2. Calls Gemini with tool configuration
     3. Handles and resolves any tool call requests sequentially
-    4. Returns (response_text, is_complete, call_outcome)
+    4. Detects completion or handoff signals
+    5. Returns TurnResult(response_text, is_complete, outcome, is_handoff, handoff_reason)
     """
     session = get_or_create_session(call_sid, customer_phone)
 
@@ -230,10 +244,16 @@ def process_conversation_turn(
                 config=config,
             )
         except Exception as e:
-            logger.error(f"Gemini API call failed for CallSid {call_sid}: {e}")
-            fallback_msg = "I'm sorry, I'm having trouble processing that right now. Could you please rephrase?"
+            logger.error(f"Gemini API call failed for CallSid {call_sid}: {e}", exc_info=True)
+            fallback_msg = "Let me connect you to someone who can help."
             session.history.append(types.Content(role="model", parts=[types.Part.from_text(text=fallback_msg)]))
-            return fallback_msg, False, compute_call_outcome(session.tools_called)
+            return TurnResult(
+                response_text=fallback_msg,
+                is_complete=True,
+                outcome="escalated",
+                is_handoff=True,
+                handoff_reason="tool_error",
+            )
 
         # Retrieve candidate content
         candidate_content = None
@@ -242,7 +262,13 @@ def process_conversation_turn(
 
         if not candidate_content:
             fallback_msg = "I'm sorry, I didn't quite catch that. Could you repeat?"
-            return fallback_msg, False, compute_call_outcome(session.tools_called)
+            return TurnResult(
+                response_text=fallback_msg,
+                is_complete=False,
+                outcome=compute_call_outcome(session.tools_called),
+                is_handoff=False,
+                handoff_reason=None,
+            )
 
         # Append model content to session history
         session.history.append(candidate_content)
@@ -261,7 +287,18 @@ def process_conversation_turn(
                 func_args = dict(fc.args) if fc.args else {}
                 session.tools_called.add(func_name)
 
-                result = execute_tool_call(func_name, func_args, customer_phone)
+                try:
+                    result = execute_tool_call(func_name, func_args, customer_phone)
+                except Exception as e:
+                    logger.error(f"Tool execution '{func_name}' failed for CallSid {call_sid}: {e}", exc_info=True)
+                    fallback_msg = "Let me connect you to someone who can help."
+                    return TurnResult(
+                        response_text=fallback_msg,
+                        is_complete=True,
+                        outcome="escalated",
+                        is_handoff=True,
+                        handoff_reason="tool_error",
+                    )
 
                 tool_response_parts.append(
                     types.Part.from_function_response(
@@ -284,15 +321,43 @@ def process_conversation_turn(
 
         text_response = text_response.strip()
 
+        # Check for handoff marker [HANDOFF:<reason>]
+        handoff_match = re.search(r"\[HANDOFF:([a-zA-Z0-9_]+)\]", text_response)
+        if handoff_match:
+            reason = handoff_match.group(1)
+            clean_text = re.sub(r"\[HANDOFF:[a-zA-Z0-9_]+\]", "", text_response).strip()
+            if not clean_text:
+                clean_text = "Let me connect you to someone who can help."
+            session.is_complete = True
+            return TurnResult(
+                response_text=clean_text,
+                is_complete=True,
+                outcome="escalated",
+                is_handoff=True,
+                handoff_reason=reason,
+            )
+
         # Check for end-of-call marker
         if "[CALL_COMPLETE]" in text_response:
             session.is_complete = True
             text_response = text_response.replace("[CALL_COMPLETE]", "").strip()
 
         outcome = compute_call_outcome(session.tools_called)
-        return text_response, session.is_complete, outcome
+        return TurnResult(
+            response_text=text_response,
+            is_complete=session.is_complete,
+            outcome=outcome,
+            is_handoff=False,
+            handoff_reason=None,
+        )
 
     # Fallback if max tool turns exceeded
     fallback_msg = "Thank you for calling. I have processed your request."
     outcome = compute_call_outcome(session.tools_called)
-    return fallback_msg, session.is_complete, outcome
+    return TurnResult(
+        response_text=fallback_msg,
+        is_complete=session.is_complete,
+        outcome=outcome,
+        is_handoff=False,
+        handoff_reason=None,
+    )
