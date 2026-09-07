@@ -54,3 +54,44 @@ uvicorn app.main:app --reload
 ```
 
 The API will be available at `http://127.0.0.1:8000`. You can check server health at `http://127.0.0.1:8000/health`.
+
+## Manual Testing with Twilio & ngrok
+
+### Prerequisites
+- A Twilio trial or active account and an active Twilio Phone Number.
+- `ngrok` installed locally.
+
+### Steps
+1. **Start the local FastAPI backend server:**
+   ```bash
+   cd backend
+   uvicorn app.main:app --port 8000 --reload
+   ```
+
+2. **Expose local server using ngrok:**
+   ```bash
+   ngrok http 8000
+   ```
+   Copy the generated public HTTPS URL (e.g., `https://xxxx.ngrok-free.app`).
+
+3. **Configure Environment Variables:**
+   Set `PUBLIC_BASE_URL` in `backend/.env` to your ngrok URL:
+   ```env
+   PUBLIC_BASE_URL=https://xxxx.ngrok-free.app
+   TWILIO_ACCOUNT_SID=your_account_sid
+   TWILIO_AUTH_TOKEN=your_auth_token
+   TWILIO_PHONE_NUMBER=your_twilio_phone_number
+   SKIP_TWILIO_SIGNATURE_VALIDATION=false
+   ```
+   *(Note: Set `SKIP_TWILIO_SIGNATURE_VALIDATION=true` if testing locally without webhook signature validation.)*
+
+4. **Configure Twilio Phone Number Webhook:**
+   - Log into the [Twilio Console](https://console.twilio.com/).
+   - Navigate to **Phone Numbers** > **Manage** > **Active numbers**.
+   - Click your Twilio Phone Number.
+   - Under **Voice & Fax**, set **A CALL COMES IN** webhook to:
+     `HTTP POST` `https://xxxx.ngrok-free.app/twilio/incoming-call`
+   - Save changes.
+
+5. **Place a Test Call:**
+   Call your Twilio Phone Number from any phone. You will hear the greeting message, speech input prompt, echo confirmation, and call completion logging in Supabase.
