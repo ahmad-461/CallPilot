@@ -84,3 +84,41 @@ CREATE INDEX IF NOT EXISTS idx_appointments_business_start ON appointments(busin
 CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone_number);
 CREATE INDEX IF NOT EXISTS idx_calls_business ON calls(business_id);
 CREATE INDEX IF NOT EXISTS idx_kb_docs_business ON knowledge_base_documents(business_id);
+
+-- Phase 4: Add document_id column to group chunks by parent document
+ALTER TABLE knowledge_base_documents ADD COLUMN IF NOT EXISTS document_id UUID DEFAULT gen_random_uuid();
+CREATE INDEX IF NOT EXISTS idx_kb_docs_document_id ON knowledge_base_documents(document_id);
+
+-- Phase 4: Postgres function for vector similarity search via pgvector cosine distance
+CREATE OR REPLACE FUNCTION match_knowledge_base(
+    query_embedding vector(1536),
+    match_threshold float DEFAULT 0.3,
+    match_count int DEFAULT 3,
+    p_business_id uuid DEFAULT NULL
+)
+RETURNS TABLE (
+    id uuid,
+    document_id uuid,
+    business_id uuid,
+    title text,
+    content text,
+    similarity float
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        kb.id,
+        kb.document_id,
+        kb.business_id,
+        kb.title,
+        kb.content,
+        (1 - (kb.embedding <=> query_embedding))::float AS similarity
+    FROM knowledge_base_documents kb
+    WHERE kb.business_id = p_business_id
+      AND (1 - (kb.embedding <=> query_embedding)) >= match_threshold
+    ORDER BY kb.embedding <=> query_embedding ASC
+    LIMIT match_count;
+END;
+$$;

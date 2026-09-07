@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
 from app.db.supabase_client import get_supabase_client
+from app.services import rag_service
 
 logger = logging.getLogger(__name__)
 
@@ -357,21 +358,47 @@ def get_business_info(
     query: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Returns business info for answering caller questions.
-    For Phase 3, returns hardcoded placeholder data.
+    Retrieves business information via RAG vector similarity search in knowledge_base_documents.
+    If matching chunks are found, returns them as context for the LLM.
+    If no relevant chunks are found above the similarity threshold, returns a 'no info found' result.
     """
-    # TODO: Phase 4 will wire this to RAG (knowledge_base_documents)
-    return {
-        "business_id": business_id,
-        "name": "CallPilot Salon & Spa",
-        "hours": "Monday - Friday: 9:00 AM - 6:00 PM, Saturday: 10:00 AM - 4:00 PM, Sunday: Closed",
-        "services": [
-            {"name": "Haircut & Styling", "duration": "30 mins", "price": "$50"},
-            {"name": "Coloring", "duration": "60 mins", "price": "$100"},
-            {"name": "Manicure", "duration": "30 mins", "price": "$35"},
-        ],
-        "pricing": "Haircuts start at $50, coloring starts at $100, manicure is $35.",
-        "location": "123 Main Street, Suite 100, San Francisco, CA",
-        "contact_phone": "+1-555-123-4567",
-        "query": query,
-    }
+    try:
+        results = rag_service.search_knowledge_base(
+            business_id=business_id,
+            query=query,
+            top_k=3,
+            similarity_threshold=0.3,
+        )
+
+        if not results:
+            return {
+                "found": False,
+                "business_id": business_id,
+                "query": query,
+                "message": "I don't have that information, let me connect you to someone who can help.",
+            }
+
+        relevant_passages = [
+            {
+                "title": res.get("title", ""),
+                "content": res.get("content", ""),
+                "similarity": res.get("similarity", 0.0),
+            }
+            for res in results
+        ]
+
+        return {
+            "found": True,
+            "business_id": business_id,
+            "query": query,
+            "passages": relevant_passages,
+        }
+    except Exception as e:
+        logger.error(f"Error executing RAG search for business_id {business_id}: {e}")
+        return {
+            "found": False,
+            "error": "rag_search_failed",
+            "business_id": business_id,
+            "query": query,
+            "message": "I don't have that information, let me connect you to someone who can help.",
+        }

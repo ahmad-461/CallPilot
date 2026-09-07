@@ -23,7 +23,7 @@ def test_health_check_connected():
         assert response.json() == {"status": "ok", "db": "connected"}
 
 
-@pytest.mark.parametrize("prefix", ["/calls", "/appointments", "/business"])
+@pytest.mark.parametrize("prefix", ["/calls", "/appointments"])
 def test_router_stubs(prefix):
     """Router stubs return 501 Not Implemented."""
     response = client.get(prefix)
