@@ -22,9 +22,13 @@ def test_twiml_builders():
     assert 'action="/twilio/handle-speech"' in initial_xml
     assert 'input="speech"' in initial_xml
 
-    speech_xml = build_speech_response_twiml("hello world")
-    assert "<Say>I heard you say: hello world. A human will be with you shortly.</Say>" in speech_xml
-    assert "<Hangup" in speech_xml
+    speech_ongoing_xml = build_speech_response_twiml("We are open 9am to 6pm.", is_complete=False)
+    assert "<Say>We are open 9am to 6pm.</Say>" in speech_ongoing_xml
+    assert 'action="/twilio/handle-speech"' in speech_ongoing_xml
+
+    speech_complete_xml = build_speech_response_twiml("You are booked for tomorrow at 2 PM. Goodbye!", is_complete=True)
+    assert "<Say>You are booked for tomorrow at 2 PM. Goodbye!</Say>" in speech_complete_xml
+    assert "<Hangup" in speech_complete_xml
 
     retry_xml = build_retry_twiml()
     assert "<Say>I'm sorry, I didn't catch that. Could you please repeat?</Say>" in retry_xml
@@ -73,24 +77,61 @@ def test_incoming_call_success(mock_get_supabase):
 
 @patch.dict(os.environ, {"SKIP_TWILIO_SIGNATURE_VALIDATION": "true"})
 @patch("app.routes.twilio.get_supabase_client")
-def test_handle_speech_with_result(mock_get_supabase):
-    """Handle speech callback with SpeechResult echoes speech and updates call log."""
+@patch("app.routes.twilio.llm_service")
+def test_handle_speech_with_result_ongoing(mock_llm, mock_get_supabase):
+    """Handle speech callback processes speech through LLM and returns gather TwiML for ongoing call."""
     mock_supabase = MagicMock()
     mock_table = MagicMock()
     mock_supabase.table.return_value = mock_table
     mock_table.select.return_value.eq.return_value.execute.return_value.data = [
-        {"started_at": "2025-01-01T00:00:00+00:00"}
+        {"started_at": "2025-01-01T00:00:00+00:00", "transcript": None}
     ]
     mock_get_supabase.return_value = mock_supabase
 
+    mock_llm.process_conversation_turn.return_value = (
+        "We are open Monday through Friday from 9 AM to 6 PM.",
+        False,
+        "info-only",
+    )
+
     response = client.post(
         "/twilio/handle-speech",
-        data={"CallSid": "CA12345", "SpeechResult": "I need to schedule a haircut"},
+        data={"CallSid": "CA12345", "From": "+15551234567", "SpeechResult": "What are your business hours?"},
     )
     assert response.status_code == 200
     assert "text/xml" in response.headers["content-type"]
-    assert "<Say>I heard you say: I need to schedule a haircut. A human will be with you shortly.</Say>" in response.text
+    assert "<Say>We are open Monday through Friday from 9 AM to 6 PM.</Say>" in response.text
+    assert 'action="/twilio/handle-speech"' in response.text
+
+
+@patch.dict(os.environ, {"SKIP_TWILIO_SIGNATURE_VALIDATION": "true"})
+@patch("app.routes.twilio.get_supabase_client")
+@patch("app.routes.twilio.llm_service")
+def test_handle_speech_with_result_complete(mock_llm, mock_get_supabase):
+    """Handle speech callback processes speech through LLM and hangs up when conversation complete."""
+    mock_supabase = MagicMock()
+    mock_table = MagicMock()
+    mock_supabase.table.return_value = mock_table
+    mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+        {"started_at": "2025-01-01T00:00:00+00:00", "transcript": None}
+    ]
+    mock_get_supabase.return_value = mock_supabase
+
+    mock_llm.process_conversation_turn.return_value = (
+        "You are all set for 2 PM tomorrow! Thank you for calling.",
+        True,
+        "booked",
+    )
+
+    response = client.post(
+        "/twilio/handle-speech",
+        data={"CallSid": "CA12345", "From": "+15551234567", "SpeechResult": "Sounds great, thanks!"},
+    )
+    assert response.status_code == 200
+    assert "text/xml" in response.headers["content-type"]
+    assert "<Say>You are all set for 2 PM tomorrow! Thank you for calling.</Say>" in response.text
     assert "<Hangup" in response.text
+    mock_llm.clear_session.assert_called_once_with("CA12345")
 
 
 @patch.dict(os.environ, {"SKIP_TWILIO_SIGNATURE_VALIDATION": "true"})

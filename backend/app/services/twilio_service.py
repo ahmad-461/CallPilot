@@ -53,14 +53,18 @@ def build_initial_call_twiml() -> str:
     return str(response)
 
 
-def build_speech_response_twiml(speech_result: str) -> str:
+def build_speech_response_twiml(response_text: str, is_complete: bool = False) -> str:
     """
-    Builds TwiML response when caller speech is successfully received:
-    Echoes back speech and hangs up.
+    Builds TwiML response for LLM conversation turn:
+    Says LLM response text, and either gathers next speech input (if active) or hangs up (if complete).
     """
     response = VoiceResponse()
-    response.say(f"I heard you say: {speech_result}. A human will be with you shortly.")
-    response.hangup()
+    response.say(response_text)
+    if is_complete:
+        response.hangup()
+    else:
+        gather = Gather(input="speech", action="/twilio/handle-speech", speech_timeout="auto")
+        response.append(gather)
     return str(response)
 
 
