@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS appointments (
 -- 4. Calls Table
 CREATE TABLE IF NOT EXISTS calls (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    call_sid TEXT UNIQUE NOT NULL,
     business_id UUID NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     customer_phone TEXT NOT NULL,
     started_at TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -2,7 +2,7 @@ from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.supabase_client import check_db_connection
-from app.routes import calls, appointments, business
+from app.routes import calls, appointments, business, twilio
 
 app = FastAPI(
     title="CallPilot API",
@@ -28,6 +28,7 @@ app.add_middleware(
 app.include_router(calls.router)
 app.include_router(appointments.router)
 app.include_router(business.router)
+app.include_router(twilio.router)
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
