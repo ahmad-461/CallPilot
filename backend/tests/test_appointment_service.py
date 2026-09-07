@@ -11,13 +11,25 @@ from app.services.appointment_service import (
 )
 
 
-def test_get_business_info():
-    info = get_business_info()
+@patch("app.services.rag_service.search_knowledge_base")
+def test_get_business_info(mock_search):
+    mock_search.return_value = [
+        {"title": "Hours & Location", "content": "Open Mon-Fri 9-6", "similarity": 0.85}
+    ]
+    info = get_business_info(query="What are your hours?")
     assert info["business_id"] == PLACEHOLDER_BUSINESS_ID
-    assert "CallPilot" in info["name"]
-    assert "hours" in info
-    assert "services" in info
-    assert "pricing" in info
+    assert info["found"] is True
+    assert len(info["passages"]) == 1
+    assert info["passages"][0]["title"] == "Hours & Location"
+
+
+@patch("app.services.rag_service.search_knowledge_base")
+def test_get_business_info_no_match(mock_search):
+    mock_search.return_value = []
+    info = get_business_info(query="Do you offer pet grooming?")
+    assert info["business_id"] == PLACEHOLDER_BUSINESS_ID
+    assert info["found"] is False
+    assert "don't have that information" in info["message"]
 
 
 @patch("app.services.appointment_service.get_supabase_client")
