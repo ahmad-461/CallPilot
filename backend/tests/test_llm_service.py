@@ -3,6 +3,7 @@ import pytest
 from google.genai import types
 
 from app.services.llm_service import (
+    TurnResult,
     compute_call_outcome,
     get_or_create_session,
     get_session,
@@ -62,15 +63,71 @@ def test_process_conversation_turn_with_mock_client():
     mock_response.candidates = [mock_candidate]
     mock_client.models.generate_content.return_value = mock_response
 
-    text, is_complete, outcome = process_conversation_turn(
+    result = process_conversation_turn(
         call_sid=call_sid,
         customer_phone=phone,
         user_speech="What are your hours?",
         client=mock_client,
     )
 
-    assert text == "I can help you with that!"
-    assert is_complete is True
-    assert outcome == "unresolved"
+    assert isinstance(result, TurnResult)
+    assert result.response_text == "I can help you with that!"
+    assert result.is_complete is True
+    assert result.outcome == "unresolved"
+    assert result.is_handoff is False
+    assert result.handoff_reason is None
+
+    clear_session(call_sid)
+
+
+def test_process_conversation_turn_explicit_handoff():
+    call_sid = "CA_handoff_1"
+    phone = "+15559999999"
+
+    mock_client = MagicMock()
+    mock_part = types.Part.from_text(text="Connecting you to an agent now. [HANDOFF:explicit_request]")
+    mock_content = types.Content(role="model", parts=[mock_part])
+    mock_candidate = MagicMock()
+    mock_candidate.content = mock_content
+
+    mock_response = MagicMock()
+    mock_response.candidates = [mock_candidate]
+    mock_client.models.generate_content.return_value = mock_response
+
+    result = process_conversation_turn(
+        call_sid=call_sid,
+        customer_phone=phone,
+        user_speech="I want to speak with a representative",
+        client=mock_client,
+    )
+
+    assert result.response_text == "Connecting you to an agent now."
+    assert result.is_complete is True
+    assert result.outcome == "escalated"
+    assert result.is_handoff is True
+    assert result.handoff_reason == "explicit_request"
+
+    clear_session(call_sid)
+
+
+def test_process_conversation_turn_api_error_handoff():
+    call_sid = "CA_handoff_err"
+    phone = "+15559999999"
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = Exception("Gemini Service Unavailable")
+
+    result = process_conversation_turn(
+        call_sid=call_sid,
+        customer_phone=phone,
+        user_speech="Hello",
+        client=mock_client,
+    )
+
+    assert result.response_text == "Let me connect you to someone who can help."
+    assert result.is_complete is True
+    assert result.outcome == "escalated"
+    assert result.is_handoff is True
+    assert result.handoff_reason == "tool_error"
 
     clear_session(call_sid)

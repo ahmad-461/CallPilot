@@ -122,3 +122,6 @@ BEGIN
     LIMIT match_count;
 END;
 $$;
+
+-- Phase 5: Add handoff_reason column to calls table to log escalation reasons
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS handoff_reason TEXT;

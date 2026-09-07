@@ -4,12 +4,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.llm_service import TurnResult
 from app.services.twilio_service import (
     validate_twilio_request,
     build_initial_call_twiml,
     build_speech_response_twiml,
     build_retry_twiml,
     build_fallback_twiml,
+    build_transfer_twiml,
+    build_no_agent_twiml,
 )
 
 client = TestClient(app)
@@ -37,6 +40,15 @@ def test_twiml_builders():
     fallback_xml = build_fallback_twiml()
     assert "<Say>Let me connect you to someone who can help</Say>" in fallback_xml
     assert "<Hangup" in fallback_xml
+
+    transfer_xml = build_transfer_twiml("+15559876543", "Hold on while I connect you.")
+    assert "<Say>Hold on while I connect you.</Say>" in transfer_xml
+    assert '<Dial action="/twilio/dial-status" method="POST">' in transfer_xml
+    assert "+15559876543</Dial>" in transfer_xml
+
+    no_agent_xml = build_no_agent_twiml()
+    assert "<Say>I'm sorry, no one is available to take your call right now. Please try again later.</Say>" in no_agent_xml
+    assert "<Hangup" in no_agent_xml
 
 
 @patch.dict(os.environ, {"SKIP_TWILIO_SIGNATURE_VALIDATION": "false", "TWILIO_AUTH_TOKEN": "testtoken"})
@@ -88,10 +100,12 @@ def test_handle_speech_with_result_ongoing(mock_llm, mock_get_supabase):
     ]
     mock_get_supabase.return_value = mock_supabase
 
-    mock_llm.process_conversation_turn.return_value = (
-        "We are open Monday through Friday from 9 AM to 6 PM.",
-        False,
-        "info-only",
+    mock_llm.process_conversation_turn.return_value = TurnResult(
+        response_text="We are open Monday through Friday from 9 AM to 6 PM.",
+        is_complete=False,
+        outcome="info-only",
+        is_handoff=False,
+        handoff_reason=None,
     )
 
     response = client.post(
@@ -117,10 +131,12 @@ def test_handle_speech_with_result_complete(mock_llm, mock_get_supabase):
     ]
     mock_get_supabase.return_value = mock_supabase
 
-    mock_llm.process_conversation_turn.return_value = (
-        "You are all set for 2 PM tomorrow! Thank you for calling.",
-        True,
-        "booked",
+    mock_llm.process_conversation_turn.return_value = TurnResult(
+        response_text="You are all set for 2 PM tomorrow! Thank you for calling.",
+        is_complete=True,
+        outcome="booked",
+        is_handoff=False,
+        handoff_reason=None,
     )
 
     response = client.post(
@@ -169,3 +185,86 @@ def test_handle_speech_empty_second_attempt(mock_get_supabase):
     assert "text/xml" in response.headers["content-type"]
     assert "<Say>Let me connect you to someone who can help</Say>" in response.text
     assert "<Hangup" in response.text
+
+
+@patch.dict(os.environ, {"SKIP_TWILIO_SIGNATURE_VALIDATION": "true", "HUMAN_AGENT_PHONE_NUMBER": "+15559876543"})
+@patch("app.routes.twilio.get_supabase_client")
+@patch("app.routes.twilio.llm_service")
+def test_handle_speech_handoff_with_agent_configured(mock_llm, mock_get_supabase):
+    """Handle speech returning handoff signal transfers call via <Dial> to agent phone number."""
+    mock_supabase = MagicMock()
+    mock_table = MagicMock()
+    mock_supabase.table.return_value = mock_table
+    mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+        {"started_at": "2025-01-01T00:00:00+00:00", "transcript": None}
+    ]
+    mock_get_supabase.return_value = mock_supabase
+
+    mock_llm.process_conversation_turn.return_value = TurnResult(
+        response_text="Let me connect you to someone who can help.",
+        is_complete=True,
+        outcome="escalated",
+        is_handoff=True,
+        handoff_reason="explicit_request",
+    )
+
+    response = client.post(
+        "/twilio/handle-speech",
+        data={"CallSid": "CA_handoff_call", "From": "+15551234567", "SpeechResult": "Can I speak to a person?"},
+    )
+    assert response.status_code == 200
+    assert "text/xml" in response.headers["content-type"]
+    assert "<Say>Let me connect you to someone who can help.</Say>" in response.text
+    assert '<Dial action="/twilio/dial-status" method="POST">+15559876543</Dial>' in response.text
+    mock_llm.clear_session.assert_called_once_with("CA_handoff_call")
+
+
+@patch.dict(os.environ, {"SKIP_TWILIO_SIGNATURE_VALIDATION": "true", "HUMAN_AGENT_PHONE_NUMBER": ""})
+@patch("app.routes.twilio.get_supabase_client")
+@patch("app.routes.twilio.llm_service")
+def test_handle_speech_handoff_without_agent_configured(mock_llm, mock_get_supabase):
+    """Handle speech returning handoff signal falls back gracefully when HUMAN_AGENT_PHONE_NUMBER is unconfigured."""
+    mock_supabase = MagicMock()
+    mock_table = MagicMock()
+    mock_supabase.table.return_value = mock_table
+    mock_table.select.return_value.eq.return_value.execute.return_value.data = []
+    mock_get_supabase.return_value = mock_supabase
+
+    mock_llm.process_conversation_turn.return_value = TurnResult(
+        response_text="Let me connect you to someone who can help.",
+        is_complete=True,
+        outcome="escalated",
+        is_handoff=True,
+        handoff_reason="explicit_request",
+    )
+
+    response = client.post(
+        "/twilio/handle-speech",
+        data={"CallSid": "CA_no_agent_call", "From": "+15551234567", "SpeechResult": "Agent please"},
+    )
+    assert response.status_code == 200
+    assert "text/xml" in response.headers["content-type"]
+    assert "<Say>I'm sorry, no one is available to take your call right now. Please try again later.</Say>" in response.text
+    assert "<Hangup" in response.text
+
+
+@patch.dict(os.environ, {"SKIP_TWILIO_SIGNATURE_VALIDATION": "true"})
+@patch("app.routes.twilio.get_supabase_client")
+def test_dial_status_callback(mock_get_supabase):
+    """Dial status callback endpoint updates call record in Supabase with status details."""
+    mock_supabase = MagicMock()
+    mock_table = MagicMock()
+    mock_supabase.table.return_value = mock_table
+    mock_table.select.return_value.eq.return_value.execute.return_value.data = [
+        {"transcript": "User: Representative\nAgent: Connecting you.", "handoff_reason": "explicit_request"}
+    ]
+    mock_get_supabase.return_value = mock_supabase
+
+    response = client.post(
+        "/twilio/dial-status",
+        data={"CallSid": "CA_handoff_call", "DialCallStatus": "completed", "DialCallDuration": "45"},
+    )
+    assert response.status_code == 200
+    assert "text/xml" in response.headers["content-type"]
+    assert "<Response/>" in response.text
+    mock_supabase.table.assert_called_with("calls")

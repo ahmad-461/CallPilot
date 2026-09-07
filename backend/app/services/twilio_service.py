@@ -89,3 +89,30 @@ def build_fallback_twiml() -> str:
     response.say("Let me connect you to someone who can help")
     response.hangup()
     return str(response)
+
+
+def build_transfer_twiml(agent_phone_number: str, transition_text: str = "Let me connect you to someone who can help.") -> str:
+    """
+    Builds TwiML response to transfer call to a human agent number using <Dial>.
+    Includes status callback action pointing to /twilio/dial-status.
+    """
+    response = VoiceResponse()
+    if transition_text:
+        response.say(transition_text)
+    response.dial(
+        number=agent_phone_number,
+        action="/twilio/dial-status",
+        method="POST",
+    )
+    return str(response)
+
+
+def build_no_agent_twiml() -> str:
+    """
+    Builds TwiML response when HUMAN_AGENT_PHONE_NUMBER is not configured:
+    Apologizes and hangs up.
+    """
+    response = VoiceResponse()
+    response.say("I'm sorry, no one is available to take your call right now. Please try again later.")
+    response.hangup()
+    return str(response)
